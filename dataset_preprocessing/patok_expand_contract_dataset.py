@@ -7,7 +7,7 @@ import argparse
 from datasets import load_dataset
 
 from models.components.base_tokenizer import BaseTokenizer
-from stochastok_processor import StochastokProcessor
+from patok_processor import PatokProcessor
 from dataset_preprocessing.utils import write_tokenized_data_as_memmap
 
 
@@ -18,13 +18,13 @@ def tokenize(example, tokenizer):
     return {"ids": ids, "len": len(ids)}
 
 
-def stochastok_expand(example, stochastok_processor):
-    """Expand tokenized example using Stochastok processor."""
-    ids = stochastok_processor.expand(example["ids"])
+def patok_expand_contract(example, patok_processor):
+    """Expand and contract tokenized example using Patok processor."""
+    ids = patok_processor.affix_aware_expand_contract(example["ids"])
     return {"ids": ids, "len": len(ids)}
 
 
-def get_dataset_name(hf_dataset_name, config=None, expand_prop=None):
+def get_dataset_name(hf_dataset_name, config=None, expand_prop=None, contract_prop=None, affix_preference=None):
     """Generate standardized dataset name with optional expansion suffix."""
     base_name = hf_dataset_name.split('/')[-1]
     if config is not None:
@@ -32,8 +32,8 @@ def get_dataset_name(hf_dataset_name, config=None, expand_prop=None):
     else:
         name = base_name
     
-    if expand_prop is not None:
-        name = f"{name}-stochastok{expand_prop}"
+    if expand_prop is not None and contract_prop is not None and affix_preference is not None:
+        name = f"{name}-patok{expand_prop}-{contract_prop}-{affix_preference}"
     
     return name
 
@@ -54,9 +54,9 @@ def check_memmap_exists(folder_path):
     return os.path.exists(folder_path) and len(os.listdir(folder_path)) != 0
 
 
-def load_preexpanded_dataset(hf_dataset_name, expand_prop):
+def load_preexpanded_dataset(hf_dataset_name):
     """Load a pre-expanded dataset from HuggingFace."""
-    hf_expanded_dataset_name = f"{hf_dataset_name}-stochastok{expand_prop}"
+    hf_expanded_dataset_name = f"{hf_dataset_name}"
     print(f"Loading pre-expanded dataset from HuggingFace: {hf_expanded_dataset_name}")
     
     expanded_dataset = load_dataset(hf_expanded_dataset_name)
@@ -69,8 +69,8 @@ def load_preexpanded_dataset(hf_dataset_name, expand_prop):
     return expanded_dataset
 
 
-def load_pretokenized_and_expand(hf_dataset_name, expand_prop):
-    """Load pre-tokenized dataset and expand it with Stochastok."""
+def load_pretokenized_and_expand(hf_dataset_name, expand_prop, contract_prop, affix_preference, affix_file):
+    """Load pre-tokenized dataset and expand it with Patok."""
     hf_tokenized_dataset_name = f"{hf_dataset_name}"
     print(f"Loading pretokenized dataset from HuggingFace: {hf_tokenized_dataset_name}")
     
@@ -81,25 +81,25 @@ def load_pretokenized_and_expand(hf_dataset_name, expand_prop):
     print(f'Sample tokens: {tokenized_dataset["train"][0]["ids"][:10]}')
     print(f"Successfully loaded pretokenized dataset from HuggingFace")
     
-    # Expand with Stochastok
+    # Expand with Patok
     tokenizer = BaseTokenizer()
-    stochastok_processor = StochastokProcessor(tokenizer=tokenizer.tokenizer, expand_prop=expand_prop)
-    expand_fn = partial(stochastok_expand, stochastok_processor=stochastok_processor)
+    patok_processor = PatokProcessor(tokenizer=tokenizer.tokenizer, expand_prop=expand_prop, contract_prop=contract_prop, affix_preference=affix_preference, affixes_file=affix_file)
+    expand_contract_fn = partial(patok_expand_contract, patok_processor=patok_processor)
     
-    print(f"Expanding dataset with Stochastok (expand_prop={expand_prop})...")
+    print(f"Expanding dataset with Patok (expand_prop={expand_prop}, contract_prop={contract_prop}, affix_preference={affix_preference})...")
     max_procs = get_num_processors()
     
     expanded_dataset = tokenized_dataset.map(
-        expand_fn,
-        desc="Stochastok expanding dataset",
+        expand_contract_fn,
+        desc="Patok expanding-contracting dataset",
         num_proc=max_procs
     )
     
     return expanded_dataset
 
 
-def load_tokenize_and_expand(hf_dataset_name, config, expand_prop):
-    """Load raw dataset, tokenize, and expand with Stochastok."""
+def load_tokenize_and_expand(hf_dataset_name, config, expand_prop, contract_prop, affix_preference, affix_file):
+    """Load raw dataset, tokenize, and expand with Patok."""
     print(f"Loading {hf_dataset_name} dataset from HuggingFace...")
     
     if config is not None:
@@ -119,8 +119,8 @@ def load_tokenize_and_expand(hf_dataset_name, config, expand_prop):
     # Initialize tokenizer and processor
     tokenizer = BaseTokenizer()
     tokenize_fn = partial(tokenize, tokenizer=tokenizer)
-    stochastok_processor = StochastokProcessor(tokenizer=tokenizer.tokenizer, expand_prop=expand_prop)
-    expand_fn = partial(stochastok_expand, stochastok_processor=stochastok_processor)
+    patok_processor = PatokProcessor(tokenizer=tokenizer.tokenizer, expand_prop=expand_prop, contract_prop=contract_prop, affix_preference=affix_preference, affixes_file=affix_file)
+    expand_contract_fn = partial(patok_expand_contract, patok_processor=patok_processor)
     
     max_procs = get_num_processors()
     
@@ -134,11 +134,11 @@ def load_tokenize_and_expand(hf_dataset_name, config, expand_prop):
     
     assert "ids" in dataset_tokenized["train"].features, "Dataset must contain 'ids' column"
     
-    # Expand with Stochastok
-    print(f"Expanding dataset with Stochastok (expand_prop={expand_prop})...")
+    # Expand with Patok
+    print(f"Expanding dataset with Patok (expand_prop={expand_prop}, contract_prop={contract_prop}, affix_preference={affix_preference})...")
     dataset_expanded = dataset_tokenized.map(
-        expand_fn,
-        desc="Stochastok expanding dataset",
+        expand_contract_fn,
+        desc="Patok expanding-contracting dataset",
         num_proc=max_procs
     )
     
@@ -201,11 +201,14 @@ def prepare_data_expand(
         get_preexpanded_from_hf=False,
         save_to_hf=True,
         hf_username=None,
-        expand_prop=0.1,
+        expand_prop=0.3,
+        contract_prop=0.3,
+        affix_preference=0.7,
+        affix_file="data_other/filipino_affixes.txt",
         config=None
         ):
     """
-    Main function to prepare, tokenize, and expand dataset with Stochastok for training.
+    Main function to prepare, tokenize, and expand dataset with Patok for training.
     
     Args:
         hf_dataset_name: HuggingFace dataset identifier
@@ -214,15 +217,18 @@ def prepare_data_expand(
         get_preexpanded_from_hf: Whether to load pre-expanded data (already tokenized and expanded)
         save_to_hf: Whether to save expanded data to HuggingFace
         hf_username: HuggingFace username for uploading
-        expand_prop: Stochastok expansion proportion
+        expand_prop: Patok expansion proportion
+        contract_prop: Patok contraction proportion
+        affix_preference: Patok affix preference
+        affix_file: Path to affixes file
         config: Optional dataset configuration
     """
     # Setup paths and check if already processed
-    expanded_dataset_name = get_dataset_name(hf_dataset_name, config, expand_prop)
+    expanded_dataset_name = get_dataset_name(hf_dataset_name, config, expand_prop, contract_prop, affix_preference)
     memmap_folder = get_memmap_folder_path(data_dir, expanded_dataset_name)
     
     if check_memmap_exists(memmap_folder):
-        print(f"Stochastok-expanded memmap data already exists (path={memmap_folder})")
+        print(f"Patok-expanded memmap data already exists (path={memmap_folder})")
         return
     
     ensure_directory_exists(memmap_folder)
@@ -230,13 +236,13 @@ def prepare_data_expand(
     # Load or process dataset based on input type
     if get_preexpanded_from_hf:
         # Load pre-expanded dataset
-        expanded_dataset = load_preexpanded_dataset(hf_dataset_name, expand_prop)
+        expanded_dataset = load_preexpanded_dataset(hf_dataset_name)
     elif get_pretokenized_from_hf:
         # Load pre-tokenized and expand
-        expanded_dataset = load_pretokenized_and_expand(hf_dataset_name, expand_prop)
+        expanded_dataset = load_pretokenized_and_expand(hf_dataset_name, expand_prop, contract_prop, affix_preference, affix_file)
     else:
         # Load raw, tokenize, and expand
-        expanded_dataset = load_tokenize_and_expand(hf_dataset_name, config, expand_prop)
+        expanded_dataset = load_tokenize_and_expand(hf_dataset_name, config, expand_prop, contract_prop, affix_preference, affix_file)
     
     # Save as memmap (required for training)
     print(f"Saving to memmap...")
@@ -246,7 +252,7 @@ def prepare_data_expand(
     if save_to_hf and hf_username:
         save_expanded_to_hf(expanded_dataset, hf_username, expanded_dataset_name, data_dir)
     
-    print(f"\n\nSuccessfully prepared Stochastok-expanded dataset for training: {successfully_saved_memmap}")
+    print(f"\n\nSuccessfully prepared Patok-expanded dataset for training: {successfully_saved_memmap}")
     print(f"Dataset path: {memmap_folder}")
 
 
@@ -258,7 +264,10 @@ if __name__ == "__main__":
     parser.add_argument("--get_pretokenized_from_hf", default=False, type=bool, required=False, help="Load a dataset that is already tokenized from HuggingFace")
     parser.add_argument("--save_to_hf", default=False, type=bool, required=False, help="Save to HuggingFace after tokenization.")
     parser.add_argument("--hf_username", default=None, type=str, required=False, help="HuggingFace username used if save-to-hf==True.")
-    parser.add_argument("--expand_prop", default=0.1, type=float, required=False, help="Stochastok hyperparameter.")
+    parser.add_argument("--expand_prop", default=0.3, type=float, required=False, help="Patok expand proportion hyperparameter.")
+    parser.add_argument("--contract_prop", default=0.3, type=float, required=False, help="Patok contract proportion hyperparameter.")
+    parser.add_argument("--affix_preference", default=0.7, type=float, required=False, help="Patok affix preference hyperparameter (0-1).")
+    parser.add_argument("--affix_file", default="data_other/filipino_affixes.txt", type=str, required=False, help="Path to affixes file.")
     parser.add_argument("--config", default=None, type=str, help="HuggingFace config used.")
     args = parser.parse_args()
     print(f"\nArgs: {args}\n")
@@ -273,14 +282,17 @@ if __name__ == "__main__":
         save_to_hf=args.save_to_hf,
         hf_username=args.hf_username,
         expand_prop=args.expand_prop,
+        contract_prop=args.contract_prop,
+        affix_preference=args.affix_preference,
+        affix_file=args.affix_file,
         config=args.config,
     )
 
     # run with:
-    # python dataset_preprocessing/stochastok_expand_dataset.py --hf_dataset_name Skylion007/openwebtext --data_dir ./data --get_preexpanded_from_hf True --save_to_hf True --hf_username XXX --expand_prop 0.1
-    # python dataset_preprocessing/stochastok_expand_dataset.py --get_preexpanded_from_hf True --hf_username anyasims
-    # python dataset_preprocessing/stochastok_expand_dataset.py --save_to_hf True --hf_username anyasims
-    # python dataset_preprocessing/stochastok_expand_dataset.py --get_preexpanded_from_hf True
+    # python dataset_preprocessing/patok_expand_dataset.py --hf_dataset_name Skylion007/openwebtext --data_dir ./data --get_preexpanded_from_hf True --save_to_hf True --hf_username XXX --expand_prop 0.1
+    # python dataset_preprocessing/patok_expand_dataset.py --get_preexpanded_from_hf True --hf_username anyasims
+    # python dataset_preprocessing/patok_expand_dataset.py --save_to_hf True --hf_username anyasims
+    # python dataset_preprocessing/patok_expand_dataset.py --get_preexpanded_from_hf True
 
             
 

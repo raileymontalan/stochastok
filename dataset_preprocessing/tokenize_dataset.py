@@ -88,7 +88,6 @@ def load_and_tokenize_dataset(hf_dataset_name, config=None):
     # Tokenize the dataset
     dataset_tokenized = dataset.map(
         tokenize_fn,
-        remove_columns=["text"],
         desc="Tokenizing dataset",
         num_proc=max_procs
     )
